@@ -1,0 +1,4 @@
+sample_id,device_id,prediction_time
+X1,D1,2026-01-15T10:00:00Z
+X1,D2,2026-01-15T10:05:00Z
+X2,D1,2026-01-15 10:00:00

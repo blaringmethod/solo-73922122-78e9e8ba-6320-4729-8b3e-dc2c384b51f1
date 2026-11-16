@@ -1,0 +1,4 @@
+reading_id,device_id,measurement_time,known_time,temperature,revoked
+R1,D1,2026-01-15T10:00:00Z,2026-01-15T09:00:00Z,20.0,false
+R1,D9,2026-01-15T10:00:00Z,2026-01-15T11:00:00Z,21.0,false
+R2,D1,2026-01-15T10:30:00Z,2026-01-15T11:00:00Z,22.0,false

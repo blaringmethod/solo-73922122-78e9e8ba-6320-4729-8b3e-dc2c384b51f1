@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>取数单 #{{ job.id }} - 故障预测温度取数平台</title>
+  <style>
+    body { margin:0; font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+           background:#f5f7fa; color:#1f2328; }
+    header { background:#0b2545; color:#fff; padding:16px 28px; }
+    header a { color:#9ec5ff; }
+    main { max-width:1180px; margin:24px auto; padding:0 20px; }
+    .card { background:#fff; border:1px solid #d8dee6; border-radius:10px;
+            padding:20px 24px; margin-bottom:20px; }
+    table { border-collapse:collapse; width:100%; font-size:13px; }
+    th,td { border:1px solid #d8dee6; padding:7px 10px; text-align:left; }
+    th { background:#f0f3f7; position:sticky; top:0; }
+    .empty { color:#8c959f; font-style:italic; }
+    .meta td:first-child { width:180px; color:#57606a; }
+    .nav { display:flex; gap:14px; align-items:center; margin-top:14px; font-size:14px; }
+    .btn { display:inline-block; background:#1f6feb; color:#fff; border-radius:8px;
+           padding:8px 18px; text-decoration:none; }
+    .btn.disabled { background:#9aa4af; pointer-events:none; }
+    code { background:#f0f3f7; padding:1px 5px; border-radius:4px; font-size:12px; }
+    .muted { color:#57606a; font-size:13px; }
+  </style>
+</head>
+<body>
+<header>
+  <a href="/">← 返回首页</a>
+  <h2 style="margin:8px 0 0">取数单 #{{ job.id }}（不可变快照）</h2>
+</header>
+<main>
+  <div class="card">
+    <table class="meta">
+      <tr><td>快照样本集 ID</td><td>#{{ job.sample_set_id }}</td></tr>
+      <tr><td>快照修订集 ID</td><td>#{{ job.revision_set_id }}</td></tr>
+      <tr><td>样本总数</td><td>{{ job.total_samples }}</td></tr>
+      <tr><td>创建时间 (UTC)</td><td>{{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td></tr>
+      <tr><td>本页大小</td><td>{{ limit }}</td></tr>
+      <tr><td>当前游标</td><td><code>{{ cursor if cursor else '（首页）' }}</code></td></tr>
+    </table>
+    <p class="muted">分页按 sample_id 字典序做 keyset 游标分页；同一游标（含重启后、重试）结果恒定，不重不漏。
+      JSON：<code>/api/jobs/{{ job.id }}/results?cursor={{ cursor or '' }}&limit={{ limit }}</code></p>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>sample_id</th><th>device_id</th><th>prediction_time (UTC)</th>
+          <th>temperature</th><th>source_revision_id</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in rows %}
+        <tr>
+          <td>{{ row.sample_id }}</td>
+          <td>{{ row.device_id }}</td>
+          <td>{{ row.prediction_time.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+          <td>{% if row.temperature is none %}<span class="empty">（空）</span>{% else %}{{ row.temperature }}{% endif %}</td>
+          <td>{% if row.source_revision_id %}<code>{{ row.source_revision_id }}</code>{% else %}<span class="empty">（无）</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      {% if not rows %}
+        <tr><td colspan="5" class="empty">该游标之后没有数据。</td></tr>
+      {% endif %}
+      </tbody>
+    </table>
+
+    <div class="nav">
+      <span>共 {{ job.total_samples }} 个样本 · {% if has_more %}还有下一页{% else %}已到末页{% endif %}</span>
+      <span style="flex:1"></span>
+      {% if has_more and next_cursor %}
+        <a class="btn" href="/jobs/{{ job.id }}?cursor={{ quote(next_cursor) }}&limit={{ limit }}">下一页 →</a>
+      {% else %}
+        <span class="btn disabled">下一页 →</span>
+      {% endif %}
+    </div>
+  </div>
+</main>
+</body>
+</html>

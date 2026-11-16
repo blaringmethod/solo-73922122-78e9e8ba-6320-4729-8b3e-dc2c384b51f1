@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>故障预测温度取数平台</title>
+  <style>
+    :root { --line:#d8dee6; --bg:#f5f7fa; --accent:#1f6feb; --ok:#1a7f37; --err:#cf222e; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: "PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+           background:var(--bg); color:#1f2328; }
+    header { background:#0b2545; color:#fff; padding:16px 28px; }
+    header h1 { margin:0; font-size:20px; }
+    header p { margin:6px 0 0; font-size:13px; opacity:.85; }
+    main { max-width:1080px; margin:24px auto; padding:0 20px; }
+    .card { background:#fff; border:1px solid var(--line); border-radius:10px;
+            padding:20px 24px; margin-bottom:20px; }
+    .card h2 { margin:0 0 14px; font-size:16px; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+    @media (max-width:820px){ .grid{ grid-template-columns:1fr; } }
+    table { border-collapse:collapse; width:100%; font-size:13px; }
+    th,td { border:1px solid var(--line); padding:7px 10px; text-align:left; }
+    th { background:#f0f3f7; }
+    .muted { color:#57606a; font-size:13px; }
+    .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; }
+    .pill.on { background:#dafbe1; color:var(--ok); }
+    .pill.off { background:#f6f8fa; color:#57606a; border:1px solid var(--line); }
+    form.upload { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    input[type=file] { font-size:13px; }
+    button { background:var(--accent); color:#fff; border:0; border-radius:8px;
+             padding:8px 18px; font-size:14px; cursor:pointer; }
+    button:hover { filter:brightness(1.08); }
+    button.secondary { background:#44505e; }
+    .banner { padding:12px 16px; border-radius:8px; margin-bottom:18px; font-size:14px;
+              white-space:pre-wrap; }
+    .banner.ok { background:#dafbe1; color:var(--ok); border:1px solid #aceebb; }
+    .banner.err { background:#ffebe9; color:var(--err); border:1px solid #ffabaf; }
+    a { color:var(--accent); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    code { background:#f0f3f7; padding:1px 5px; border-radius:4px; font-size:12px; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>故障预测温度取数平台</h1>
+  <p>按预测时刻可知信息还原温度 · 无未来信息泄漏 · 取数单快照不可变</p>
+</header>
+<main>
+  {% if msg %}<div class="banner ok">{{ msg }}</div>{% endif %}
+  {% if error %}<div class="banner err">文件被拒收，原有输入保持不变：&#10;{{ error }}</div>{% endif %}
+
+  <div class="card">
+    <h2>当前输入（整份替换）</h2>
+    <div class="grid">
+      <div>
+        <strong>样本 CSV</strong>
+        {% if overview.sample_set %}
+          <span class="pill on">已上传</span>
+          <table style="margin-top:10px">
+            <tr><th>集 ID</th><td>{{ overview.sample_set.id }}</td></tr>
+            <tr><th>文件名</th><td>{{ overview.sample_set.filename }}</td></tr>
+            <tr><th>行数</th><td>{{ overview.sample_set.row_count }} / {{ max_sample_rows }}</td></tr>
+            <tr><th>上传时间(UTC)</th><td>{{ overview.sample_set.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td></tr>
+          </table>
+        {% else %}
+          <span class="pill off">未上传</span>
+        {% endif %}
+        <form class="upload" method="post" action="/uploads/samples" enctype="multipart/form-data" style="margin-top:14px">
+          <input type="file" name="file" accept=".csv,text/csv" required>
+          <button type="submit">替换样本 CSV</button>
+        </form>
+        <p class="muted">列：sample_id（唯一）、device_id、prediction_time（带时区 UTC）</p>
+      </div>
+      <div>
+        <strong>读数修订 CSV</strong>
+        {% if overview.revision_set %}
+          <span class="pill on">已上传</span>
+          <table style="margin-top:10px">
+            <tr><th>集 ID</th><td>{{ overview.revision_set.id }}</td></tr>
+            <tr><th>文件名</th><td>{{ overview.revision_set.filename }}</td></tr>
+            <tr><th>行数</th><td>{{ overview.revision_set.row_count }} / {{ max_revision_rows }}</td></tr>
+            <tr><th>上传时间(UTC)</th><td>{{ overview.revision_set.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td></tr>
+          </table>
+        {% else %}
+          <span class="pill off">未上传</span>
+        {% endif %}
+        <form class="upload" method="post" action="/uploads/revisions" enctype="multipart/form-data" style="margin-top:14px">
+          <input type="file" name="file" accept=".csv,text/csv" required>
+          <button type="submit">替换修订 CSV</button>
+        </form>
+        <p class="muted">列：reading_id、device_id、measurement_time、known_time、temperature、revoked</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>发起取数</h2>
+    {% if overview.ready %}
+      <p class="muted">取数单会快照当前两份输入（样本集 #{{ overview.sample_set.id }}、修订集 #{{ overview.revision_set.id }}），
+        并立即物化全部结果；之后再上传新文件不会影响本取数单。</p>
+      <form method="post" action="/jobs">
+        <button type="submit">发起取数并查看结果</button>
+      </form>
+    {% else %}
+      <p class="muted">请先成功上传两份输入文件。非法文件会被拒收，当前已接受的输入不受影响。</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>历史取数单（最近 20 张）</h2>
+    {% if jobs %}
+    <table>
+      <thead><tr><th>取数单</th><th>样本集</th><th>修订集</th><th>样本数</th><th>创建时间(UTC)</th><th>入口</th></tr></thead>
+      <tbody>
+      {% for job in jobs %}
+        <tr>
+          <td>#{{ job.id }}</td>
+          <td>#{{ job.sample_set_id }}</td>
+          <td>#{{ job.revision_set_id }}</td>
+          <td>{{ job.total_samples }}</td>
+          <td>{{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+          <td><a href="/jobs/{{ job.id }}">网页分页</a> ·
+              <a href="/api/jobs/{{ job.id }}/results?limit=50">JSON API</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="muted">暂无取数单。</p>{% endif %}
+  </div>
+</main>
+</body>
+</html>

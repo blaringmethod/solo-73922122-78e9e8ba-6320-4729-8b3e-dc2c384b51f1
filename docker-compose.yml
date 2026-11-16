@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tempapp
+      POSTGRES_PASSWORD: tempapp
+      POSTGRES_DB: tempapp
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tempapp -d tempapp"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  web:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://tempapp:tempapp@db:5432/tempapp
+      LOAD_DEMO_ON_START: "1"
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:
