@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>取数单 #{{ job.id }} 计算中 - 故障预测温度取数平台</title>
+  <meta http-equiv="refresh" content="3">
+  <style>
+    body { margin:0; font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+           background:#f5f7fa; color:#1f2328; }
+    header { background:#0b2545; color:#fff; padding:16px 28px; }
+    header a { color:#9ec5ff; }
+    main { max-width:860px; margin:24px auto; padding:0 20px; }
+    .card { background:#fff; border:1px solid #d8dee6; border-radius:10px; padding:24px 28px; }
+    .muted { color:#57606a; font-size:13px; }
+    .spinner { display:inline-block; width:16px; height:16px; border:3px solid #eac54f;
+               border-top-color:transparent; border-radius:50%; animation:spin 1s linear infinite;
+               vertical-align:middle; margin-right:8px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<header>
+  <a href="/">← 返回首页</a>
+  <h2 style="margin:8px 0 0">取数单 #{{ job.id }}</h2>
+</header>
+<main>
+  <div class="card">
+    {% if job.status == 'PENDING' %}
+      <p><span class="spinner"></span><strong>计算中：</strong>输入已固定（样本集 #{{ job.sample_set_id }}、修订集 #{{ job.revision_set_id }}），
+        结果正在物化。页面每 3 秒自动刷新。</p>
+      <p class="muted">计算期间该取数单以心跳租约独占其固定输入；其他实例的清退会跳过这些旧集，不等待本计算结束。
+        若计算进程退出，租约 {{ lease_ttl_seconds }} 秒无心跳即过期，下次清退可回收其旧集。</p>
+    {% else %}
+      <p><strong>该取数单已失败：</strong>{{ job.status_detail or '计算未完成' }}</p>
+      <p class="muted">其固定输入集已解绑，可通过首页清退回收弃用数据。</p>
+    {% endif %}
+  </div>
+</main>
+</body>
+</html>

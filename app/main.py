@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from . import db
 from .demo_loader import maybe_load_demo
+from .job_runner import pin_and_run
 from .parsing import (
     CSVValidationError,
     MAX_REVISION_ROWS,
@@ -19,6 +20,7 @@ from .parsing import (
     parse_revisions,
     parse_samples,
 )
+from .retirement import MAX_RETIRE_JOBS, RetirementError, parse_job_ids, retire_jobs
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
@@ -59,6 +61,7 @@ def index(request: Request, msg: str | None = None, error: str | None = None):
                 "error": error,
                 "max_sample_rows": MAX_SAMPLE_ROWS,
                 "max_revision_rows": MAX_REVISION_ROWS,
+                "max_retire_jobs": MAX_RETIRE_JOBS,
             },
         )
 
@@ -106,12 +109,59 @@ def upload_revisions(file: UploadFile | None = File(default=None)):
 @app.post("/jobs")
 def create_job():
     try:
-        with db.session_scope() as session:
-            job = db.create_fetch_job(session)
-            job_id = job.id
+        # Pin current inputs (committed first, with a lease), then materialise
+        # all results under heartbeat protection.  A concurrent upload cannot
+        # change this job; a concurrent retirement skips its pinned old sets.
+        job_id = pin_and_run()
     except ValueError as exc:
         return RedirectResponse("/?error=" + quote(str(exc)), status_code=303)
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
+@app.post("/retirements")
+async def create_retirement(request: Request):
+    form = await request.form()
+    try:
+        job_ids = parse_job_ids(form.getlist("job_ids"))
+        with db.session_scope() as session:
+            report = retire_jobs(session, job_ids)
+            report_dict = report.as_dict()
+    except RetirementError as exc:
+        return RedirectResponse("/?error=" + quote(str(exc)), status_code=303)
+    with db.session_scope() as session:
+        jobs = list(
+            session.scalars(select(db.FetchJob).order_by(db.FetchJob.id.desc()).limit(20))
+        )
+        return templates.TemplateResponse(
+            request,
+            "retirement.html",
+            {"report": report_dict, "remaining_jobs": jobs},
+        )
+
+
+@app.get("/api/retirements/preview")
+def retirement_preview():
+    """List every job with the references retirement would see."""
+    with db.session_scope() as session:
+        live = db.live_lease_job_ids(session)
+        jobs = session.scalars(select(db.FetchJob).order_by(db.FetchJob.id)).all()
+        current = session.get(db.CurrentInput, 1)
+        return {
+            "max_retire_jobs": MAX_RETIRE_JOBS,
+            "live_lease_job_ids": sorted(live),
+            "current_sample_set_id": current.sample_set_id if current else None,
+            "current_revision_set_id": current.revision_set_id if current else None,
+            "jobs": [
+                {
+                    "id": job.id,
+                    "status": job.status,
+                    "sample_set_id": job.sample_set_id,
+                    "revision_set_id": job.revision_set_id,
+                    "lease_live": job.id in live,
+                }
+                for job in jobs
+            ],
+        }
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
@@ -125,7 +175,14 @@ def job_page(
     with db.session_scope() as session:
         job = session.get(db.FetchJob, job_id)
         if job is None:
-            raise HTTPException(status_code=404, detail="取数单不存在")
+            raise HTTPException(status_code=404, detail="取数单不存在（可能已被清退）")
+        if not job.is_ready:
+            return templates.TemplateResponse(
+                request,
+                "job_pending.html",
+                {"job": job, "lease_ttl_seconds": db.lease_ttl_seconds()},
+                status_code=409,
+            )
         page, next_cursor, has_more = db.fetch_job_page(session, job_id, cursor, limit)
         return templates.TemplateResponse(
             request,
@@ -152,10 +209,20 @@ def job_results_api(
     with db.session_scope() as session:
         job = session.get(db.FetchJob, job_id)
         if job is None:
-            raise HTTPException(status_code=404, detail="取数单不存在")
+            raise HTTPException(status_code=404, detail="取数单不存在（可能已被清退）")
+        if not job.is_ready:
+            return {
+                "job_id": job_id,
+                "status": job.status,
+                "detail": job.status_detail,
+                "items": [],
+                "next_cursor": None,
+                "has_more": False,
+            }
         page, next_cursor, has_more = db.fetch_job_page(session, job_id, cursor, limit)
         return {
             "job_id": job_id,
+            "status": job.status,
             "sample_set_id": job.sample_set_id,
             "revision_set_id": job.revision_set_id,
             "total_samples": job.total_samples,

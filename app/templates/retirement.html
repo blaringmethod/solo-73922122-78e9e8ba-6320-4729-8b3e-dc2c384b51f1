@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>清退结果 - 故障预测温度取数平台</title>
+  <style>
+    body { margin:0; font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+           background:#f5f7fa; color:#1f2328; }
+    header { background:#0b2545; color:#fff; padding:16px 28px; }
+    header a { color:#9ec5ff; }
+    main { max-width:1080px; margin:24px auto; padding:0 20px; }
+    .card { background:#fff; border:1px solid #d8dee6; border-radius:10px;
+            padding:20px 24px; margin-bottom:20px; }
+    table { border-collapse:collapse; width:100%; font-size:13px; }
+    th,td { border:1px solid #d8dee6; padding:7px 10px; text-align:left; vertical-align:top; }
+    th { background:#f0f3f7; }
+    .muted { color:#57606a; font-size:13px; }
+    .num { font-size:26px; font-weight:600; color:#0b2545; }
+    .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+    @media (max-width:820px){ .grid{ grid-template-columns:1fr 1fr; } }
+    .stat { border:1px solid #d8dee6; border-radius:10px; padding:14px 16px; background:#fafbfc; }
+    .stat .label { font-size:12px; color:#57606a; }
+    .reason { color:#9a6700; }
+    code { background:#f0f3f7; padding:1px 5px; border-radius:4px; font-size:12px; }
+    .btn { display:inline-block; background:#1f6feb; color:#fff; border-radius:8px;
+           padding:8px 18px; text-decoration:none; }
+  </style>
+</head>
+<body>
+<header>
+  <a href="/">← 返回首页</a>
+  <h2 style="margin:8px 0 0">清退结果报告</h2>
+</header>
+<main>
+  <div class="card">
+    <div class="grid">
+      <div class="stat"><div class="label">删除取数单</div><div class="num">{{ report.deleted_job_count }}</div>
+        <div class="muted">编号：{{ report.deleted_jobs if report.deleted_jobs else '—' }}</div></div>
+      <div class="stat"><div class="label">删除物化结果行</div><div class="num">{{ report.deleted_result_rows }}</div></div>
+      <div class="stat"><div class="label">回收样本集 / 明细行</div>
+        <div class="num">{{ report.deleted_sample_sets|length }} <span class="muted">集</span> / {{ report.deleted_sample_rows }} <span class="muted">行</span></div>
+        <div class="muted">集编号：{{ report.deleted_sample_sets if report.deleted_sample_sets else '—' }}</div></div>
+      <div class="stat"><div class="label">回收修订集 / 明细行</div>
+        <div class="num">{{ report.deleted_revision_sets|length }} <span class="muted">集</span> / {{ report.deleted_revision_rows }} <span class="muted">行</span></div>
+        <div class="muted">集编号：{{ report.deleted_revision_sets if report.deleted_revision_sets else '—' }}</div></div>
+    </div>
+    {% if report.reaped_dead_jobs %}
+    <p class="muted" style="margin-top:14px">
+      另发现计算进程已退出、心跳租约过期的计算中取数单
+      {{ report.reaped_dead_jobs }}：已标记为失败并解绑其独占旧集，使这些旧集本次可回收。
+    </p>
+    {% endif %}
+    <p class="muted">本次请求清退编号：{{ report.requested_job_ids }}（整次事务，任一失败则全部回滚）。</p>
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 12px;font-size:16px">跳过明细与原因</h2>
+    <table>
+      <thead><tr><th>对象</th><th>类型</th><th>编号</th><th>跳过原因</th></tr></thead>
+      <tbody>
+      {% for item in report.skipped_jobs %}
+        <tr><td>取数单</td><td>—</td><td>#{{ item.job_id }}</td><td class="reason">{{ item.reason }}</td></tr>
+      {% endfor %}
+      {% for item in report.skipped_sample_sets %}
+        <tr><td>样本集</td><td>sample</td><td>#{{ item.set_id }}</td><td class="reason">{{ item.reason }}</td></tr>
+      {% endfor %}
+      {% for item in report.skipped_revision_sets %}
+        <tr><td>修订集</td><td>revision</td><td>#{{ item.set_id }}</td><td class="reason">{{ item.reason }}</td></tr>
+      {% endfor %}
+      {% if not report.skipped_jobs and not report.skipped_sample_sets and not report.skipped_revision_sets %}
+        <tr><td colspan="4" class="muted">没有跳过任何对象。</td></tr>
+      {% endif %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 12px;font-size:16px">剩余取数单</h2>
+    {% if remaining_jobs %}
+    <table>
+      <thead><tr><th>取数单</th><th>状态</th><th>样本集</th><th>修订集</th><th>样本数</th></tr></thead>
+      <tbody>
+      {% for job in remaining_jobs %}
+        <tr>
+          <td>#{{ job.id }}</td>
+          <td>{{ job.status }}</td>
+          <td>{{ '#' ~ job.sample_set_id if job.sample_set_id else '（已解绑）' }}</td>
+          <td>{{ '#' ~ job.revision_set_id if job.revision_set_id else '（已解绑）' }}</td>
+          <td>{{ job.total_samples }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="muted">已无取数单。</p>{% endif %}
+    <p style="margin-top:14px"><a class="btn" href="/">返回首页</a></p>
+  </div>
+</main>
+</body>
+</html>

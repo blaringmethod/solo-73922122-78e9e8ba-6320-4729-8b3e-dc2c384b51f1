@@ -18,9 +18,12 @@ the same cursor.
 from __future__ import annotations
 
 import os
+import socket
+import threading
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     BigInteger,
@@ -29,10 +32,14 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     String,
+    Text,
     UniqueConstraint,
     create_engine,
+    inspect,
     select,
+    text,
 )
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.dialects.sqlite import DATETIME as SQLITE_DATETIME
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import (
@@ -42,9 +49,30 @@ from sqlalchemy.orm import (
     relationship,
     sessionmaker,
 )
+from sqlalchemy.sql.expression import Insert
 from sqlalchemy.types import TypeDecorator
 
 from .parsing import RevisionRow, SampleRow
+
+
+class _InsertIfAbsent(Insert):
+    """INSERT that silently ignores a primary-key conflict.
+
+    Compiled to ``ON CONFLICT DO NOTHING`` on PostgreSQL and
+    ``INSERT OR IGNORE`` on SQLite: the two backends this app ships on.
+    """
+
+    inherit_cache = True
+
+
+@compiles(_InsertIfAbsent, "postgresql")
+def _compile_insert_if_absent_pg(element, compiler, **kw):
+    return compiler.visit_insert(element, **kw) + " ON CONFLICT DO NOTHING"
+
+
+@compiles(_InsertIfAbsent, "sqlite")
+def _compile_insert_if_absent_sqlite(element, compiler, **kw):
+    return compiler.visit_insert(element, **kw).replace("INSERT INTO", "INSERT OR IGNORE INTO", 1)
 
 
 class BigIntPK(BigInteger):
@@ -190,16 +218,48 @@ class CurrentInput(Base):
 
 class FetchJob(Base):
     __tablename__ = "fetch_jobs"
+    # PENDING: inputs pinned, materialisation in progress (a JobLease exists).
+    # READY:   all result rows materialised, the immutable snapshot page.
+    # FAILED:  the computing process died and a retirement reaped it; the set
+    #          references are detached (nullable) so the old sets can be freed.
     id: Mapped[int] = mapped_column(primary_key=True)
-    sample_set_id: Mapped[int] = mapped_column(ForeignKey("sample_sets.id", ondelete="RESTRICT"))
-    revision_set_id: Mapped[int] = mapped_column(
-        ForeignKey("revision_sets.id", ondelete="RESTRICT")
+    sample_set_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sample_sets.id", ondelete="RESTRICT"), nullable=True
     )
-    total_samples: Mapped[int]
+    revision_set_id: Mapped[int | None] = mapped_column(
+        ForeignKey("revision_sets.id", ondelete="RESTRICT"), nullable=True
+    )
+    total_samples: Mapped[int] = mapped_column(default=0)
+    status: Mapped[str] = mapped_column(String(16), default="PENDING", index=True)
+    status_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TS, default=lambda: datetime.now(timezone.utc))
     results: Mapped[list["FetchResult"]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
+
+    @property
+    def is_ready(self) -> bool:
+        return self.status == "READY"
+
+
+class JobLease(Base):
+    """Heartbeat lease held while a job is being materialised.
+
+    The row is created together with the PENDING job pin and deleted as soon
+    as materialisation finishes.  While ``heartbeat_at`` is fresh the pinned
+    (possibly already superseded) input sets are *exclusive* to this worker:
+    retirement must skip them.  If the computing process exits, the heartbeat
+    goes stale; the next retirement treats the job as dead and may free its
+    sets.  Portable across PostgreSQL and SQLite (no backend-specific locks).
+    """
+
+    __tablename__ = "job_leases"
+    job_id: Mapped[int] = mapped_column(
+        ForeignKey("fetch_jobs.id", ondelete="CASCADE"), primary_key=True
+    )
+    owner: Mapped[str] = mapped_column(String(120))
+    heartbeat_at: Mapped[datetime] = mapped_column(TS, index=True)
+    created_at: Mapped[datetime] = mapped_column(TS, default=lambda: datetime.now(timezone.utc))
 
 
 class FetchResult(Base):
@@ -234,8 +294,95 @@ engine = create_engine(database_url(), pool_pre_ping=True, future=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 
+def _lease_ttl_seconds() -> int:
+    """A lease whose heartbeat is older than this is considered dead.
+
+    Overridable via ``JOB_LEASE_TTL_SECONDS`` so tests can simulate a crashed
+    worker without sleeping for the production interval.
+    """
+    raw = os.environ.get("JOB_LEASE_TTL_SECONDS")
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return 30
+
+
+def lease_ttl_seconds() -> int:
+    return _lease_ttl_seconds()
+
+
+def lease_ttl() -> timedelta:
+    return timedelta(seconds=_lease_ttl_seconds())
+
+
+def instance_owner() -> str:
+    """Stable identifier of this web process, shown on lease rows."""
+    explicit = os.environ.get("INSTANCE_OWNER")
+    if explicit:
+        return explicit[:120]
+    return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
 def init_db() -> None:
-    Base.metadata.create_all(engine)
+    # Two instances start together and may run DDL at the same moment.
+    # PostgreSQL serialises CREATE TABLE safely; SQLite can still raise
+    # "table already exists" between the checkfirst probe and the CREATE, so
+    # retry once in that case (the winning instance has created the table).
+    try:
+        Base.metadata.create_all(engine)
+    except OperationalError as exc:
+        if engine.dialect.name != "sqlite" or "already exists" not in str(exc):
+            raise
+        Base.metadata.create_all(engine)
+    _apply_lightweight_migrations()
+
+
+def _apply_lightweight_migrations() -> None:
+    """Add columns introduced after the first release to pre-existing tables.
+
+    Deployments created before the retirement feature lack ``status`` etc.;
+    ``create_all`` never alters existing tables, so add them idempotently.
+    Existing jobs are all fully materialised snapshots, hence backfilled to
+    READY.
+    """
+    inspector = inspect(engine)
+    existing = {column["name"] for column in inspector.get_columns("fetch_jobs")}
+    type_map = {
+        "status": "VARCHAR(16)",
+        "status_detail": "TEXT",
+    }
+    with engine.begin() as conn:
+        for column, ddl_type in type_map.items():
+            if column not in existing:
+                try:
+                    conn.execute(
+                        text(f"ALTER TABLE fetch_jobs ADD COLUMN {column} {ddl_type}")
+                    )
+                except OperationalError as exc:
+                    # Concurrent startup on SQLite: the other instance added it.
+                    if engine.dialect.name != "sqlite" or "duplicate column" not in str(exc):
+                        raise
+        if "status" not in existing:
+            conn.execute(text("UPDATE fetch_jobs SET status = 'READY'"))
+        if "sample_set_id" in existing and engine.dialect.name == "postgresql":
+            # Older PostgreSQL schema declared the snapshot FKs NOT NULL;
+            # retirement of a dead job needs to detach them.  SQLite cannot
+            # DROP NOT NULL via ALTER TABLE, but SQLite databases are test-only
+            # and always created fresh by create_all (nullable from the start).
+            conn.execute(
+                text(
+                    "ALTER TABLE fetch_jobs ALTER COLUMN sample_set_id DROP NOT NULL"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE fetch_jobs ALTER COLUMN revision_set_id DROP NOT NULL"
+                )
+            )
 
 
 @contextmanager
@@ -251,13 +398,65 @@ def session_scope() -> Iterator:
         session.close()
 
 
+def _ensure_current_row(session) -> None:
+    """Idempotently create the singleton current-input row (cross-process safe).
+
+    Uses :class:`_InsertIfAbsent`, compiled to ``ON CONFLICT DO NOTHING`` on
+    PostgreSQL and ``INSERT OR IGNORE`` on SQLite, so two instances hitting an
+    empty database at once cannot violate the primary key.
+    """
+    session.execute(
+        _InsertIfAbsent(CurrentInput.__table__).values(
+            id=1,
+            sample_set_id=None,
+            revision_set_id=None,
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+
+
 def _get_current(session) -> CurrentInput:
     current = session.get(CurrentInput, 1)
     if current is None:
-        current = CurrentInput(id=1, sample_set_id=None, revision_set_id=None)
-        session.add(current)
+        _ensure_current_row(session)
         session.flush()
+        current = session.get(CurrentInput, 1)
     return current
+
+
+# Serialises first-time access to the current-input singleton *within* this
+# process.  Cross-process safety (two web instances starting together) comes
+# from the idempotent upsert in :func:`current_input_locked`, which relies on
+# the database's own write/row locks instead of a Python-only mutex.
+_current_input_lock = threading.Lock()
+
+
+@contextmanager
+def current_input_locked(session):
+    """Yield the singleton current-input row, safe across processes/threads.
+
+    The row is created with an idempotent upsert (``ON CONFLICT DO NOTHING``,
+    supported by both PostgreSQL and SQLite), so two instances racing on an
+    empty database can never both insert the singleton.  PostgreSQL then takes
+    a ``SELECT ... FOR UPDATE`` row lock; SQLite has no row locks, but the
+    upsert's write lock plus the in-process mutex already serialise writers.
+
+    Used by startup demo loading so two instances cannot each insert the demo
+    input sets.
+    """
+    use_process_lock = session.bind.dialect.name == "sqlite"
+    if use_process_lock:
+        _current_input_lock.acquire()
+    try:
+        _ensure_current_row(session)
+        stmt = select(CurrentInput).where(CurrentInput.id == 1)
+        if not use_process_lock:
+            stmt = stmt.with_for_update()
+        current = session.scalars(stmt).one()
+        yield current
+    finally:
+        if use_process_lock:
+            _current_input_lock.release()
 
 
 def get_current_overview(session) -> dict:
@@ -333,25 +532,84 @@ def load_revisions(session, revision_set_id: int) -> list[RevisionRow]:
     return [record.as_row() for record in records]
 
 
-def create_fetch_job(session) -> FetchJob:
-    """Snapshot current inputs and materialise all result rows.
+def create_fetch_job(session, owner: str | None = None) -> FetchJob:
+    """Pin the current inputs into a new PENDING job and take its lease.
 
-    Runs inside the caller's single short transaction.  Every result is
-    computed and inserted here; afterwards pages only read stored rows, so
-    consistency no longer depends on any open transaction.
+    Only the snapshot ids are written here; result materialisation happens in
+    :func:`materialise_fetch_job` with its own short session, so an upload
+    replacing the current input meanwhile cannot change this job.  The lease
+    row makes the pinned -- possibly already superseded -- sets exclusive to
+    the caller while computation is running.
     """
-    from .logic import resolve_all  # local import keeps module import light
-
     overview = get_current_overview(session)
     if not overview["ready"]:
         raise ValueError("两份输入（样本 CSV 与读数修订 CSV）均已成功上传后才能发起取数")
     sample_set: SampleSet = overview["sample_set"]
     revision_set: RevisionSet = overview["revision_set"]
 
-    revisions = load_revisions(session, revision_set.id)
+    job = FetchJob(
+        sample_set_id=sample_set.id,
+        revision_set_id=revision_set.id,
+        total_samples=0,
+        status="PENDING",
+    )
+    session.add(job)
+    session.flush()
+    now = datetime.now(timezone.utc)
+    session.add(
+        JobLease(
+            job_id=job.id,
+            owner=owner or instance_owner(),
+            heartbeat_at=now,
+            created_at=now,
+        )
+    )
+    session.flush()
+    return job
+
+
+def refresh_job_lease(session, job_id: int) -> datetime:
+    """Push the heartbeat forward; raises if the lease vanished."""
+    lease = session.get(JobLease, job_id)
+    if lease is None:
+        raise LookupError(f"取数单 {job_id} 的计算租约已不存在")
+    lease.heartbeat_at = datetime.now(timezone.utc)
+    session.flush()
+    return lease.heartbeat_at
+
+
+def release_job_lease(session, job_id: int) -> None:
+    lease = session.get(JobLease, job_id)
+    if lease is not None:
+        session.delete(lease)
+        session.flush()
+
+
+def live_lease_job_ids(session) -> set[int]:
+    """Ids of jobs whose computing process is still alive (fresh heartbeat)."""
+    cutoff = datetime.now(timezone.utc) - lease_ttl()
+    rows = session.scalars(select(JobLease.job_id).where(JobLease.heartbeat_at >= cutoff))
+    return set(rows)
+
+
+def materialise_fetch_job(session, job_id: int) -> FetchJob:
+    """Compute and insert every result row for a pinned PENDING job.
+
+    Runs inside the caller's short transaction; the lease taken at pin time
+    protects the snapshot sets from retirement while this runs.
+    """
+    from .logic import resolve_all  # local import keeps module import light
+
+    job = session.get(FetchJob, job_id)
+    if job is None:
+        raise LookupError(f"取数单 {job_id} 不存在")
+    if job.status != "PENDING":
+        raise ValueError(f"取数单 {job_id} 不在计算中状态（当前 {job.status}）")
+
+    revisions = load_revisions(session, job.revision_set_id)
     samples = session.scalars(
         select(Sample)
-        .where(Sample.sample_set_id == sample_set.id)
+        .where(Sample.sample_set_id == job.sample_set_id)
         .order_by(Sample.id)
     ).all()
     sample_rows = [
@@ -362,14 +620,6 @@ def create_fetch_job(session) -> FetchJob:
         )
         for sample in samples
     ]
-
-    job = FetchJob(
-        sample_set_id=sample_set.id,
-        revision_set_id=revision_set.id,
-        total_samples=len(sample_rows),
-    )
-    session.add(job)
-    session.flush()
 
     result_rows = []
     for sample, temperature, source in resolve_all(sample_rows, revisions):
@@ -384,8 +634,22 @@ def create_fetch_job(session) -> FetchJob:
             )
         )
     session.add_all(result_rows)
+    job.total_samples = len(sample_rows)
+    job.status = "READY"
+    job.status_detail = None
     session.flush()
     return job
+
+
+def fail_fetch_job(session, job_id: int, detail: str) -> None:
+    """Mark a job FAILED and drop its lease (if any)."""
+    job = session.get(FetchJob, job_id)
+    if job is None:
+        return
+    job.status = "FAILED"
+    job.status_detail = detail
+    release_job_lease(session, job_id)
+    session.flush()
 
 
 def fetch_job_page(

@@ -6,7 +6,9 @@ import pytest
 
 _tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _tmp.close()
-os.environ["DATABASE_URL"] = f"sqlite+pysqlite:///{_tmp.name}"
+# Timeout lets the lease-heartbeat thread wait out a short SQLite write lock.
+os.environ["DATABASE_URL"] = f"sqlite+pysqlite:///{_tmp.name}?timeout=30"
+os.environ.setdefault("JOB_LEASE_TTL_SECONDS", "30")
 os.environ.pop("LOAD_DEMO_ON_START", None)
 
 from app import db  # noqa: E402

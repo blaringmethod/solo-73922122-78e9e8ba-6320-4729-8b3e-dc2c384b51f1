@@ -24,6 +24,7 @@
     .muted { color:#57606a; font-size:13px; }
     .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; }
     .pill.on { background:#dafbe1; color:var(--ok); }
+    .pill.pend { background:#fff8c5; color:#9a6700; border:1px solid #eac54f; }
     .pill.off { background:#f6f8fa; color:#57606a; border:1px solid var(--line); }
     form.upload { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
     input[type=file] { font-size:13px; }
@@ -31,6 +32,7 @@
              padding:8px 18px; font-size:14px; cursor:pointer; }
     button:hover { filter:brightness(1.08); }
     button.secondary { background:#44505e; }
+    button.danger { background:var(--err); }
     .banner { padding:12px 16px; border-radius:8px; margin-bottom:18px; font-size:14px;
               white-space:pre-wrap; }
     .banner.ok { background:#dafbe1; color:var(--ok); border:1px solid #aceebb; }
@@ -107,16 +109,26 @@
   </div>
 
   <div class="card">
-    <h2>历史取数单（最近 20 张）</h2>
+    <h2>历史取数单（最近 20 张）与清退入口</h2>
     {% if jobs %}
+    <p class="muted">勾选至多 {{ max_retire_jobs }} 张取数单后清退：被选取数单连同其物化结果删除；
+      既非当前输入、也未被<strong>剩余取数单（含计算中且租约存活的取数单）</strong>引用的样本集/修订集及明细会一并回收，
+      其余集逐条说明跳过原因。重复清退已删除的取数单不报错。</p>
+    <form method="post" action="/retirements" onsubmit="return checkRetireSelection(this);">
     <table>
-      <thead><tr><th>取数单</th><th>样本集</th><th>修订集</th><th>样本数</th><th>创建时间(UTC)</th><th>入口</th></tr></thead>
+      <thead><tr><th>选择</th><th>取数单</th><th>状态</th><th>样本集</th><th>修订集</th><th>样本数</th><th>创建时间(UTC)</th><th>入口</th></tr></thead>
       <tbody>
       {% for job in jobs %}
         <tr>
+          <td><input type="checkbox" name="job_ids" value="{{ job.id }}"></td>
           <td>#{{ job.id }}</td>
-          <td>#{{ job.sample_set_id }}</td>
-          <td>#{{ job.revision_set_id }}</td>
+          <td>
+            {% if job.status == 'READY' %}<span class="pill on">已完成</span>
+            {% elif job.status == 'PENDING' %}<span class="pill pend">计算中</span>
+            {% else %}<span class="pill off">失败</span>{% endif %}
+          </td>
+          <td>{{ '#' ~ job.sample_set_id if job.sample_set_id else '（已解绑）' }}</td>
+          <td>{{ '#' ~ job.revision_set_id if job.revision_set_id else '（已解绑）' }}</td>
           <td>{{ job.total_samples }}</td>
           <td>{{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
           <td><a href="/jobs/{{ job.id }}">网页分页</a> ·
@@ -125,6 +137,25 @@
       {% endfor %}
       </tbody>
     </table>
+      <p style="margin:12px 0 0">
+        <button type="submit" class="danger">清退选中取数单并回收弃用数据</button>
+        <span class="muted">单次最多 {{ max_retire_jobs }} 张；整次事务，失败自动回滚</span>
+      </p>
+    </form>
+    <script>
+      function checkRetireSelection(form) {
+        var picked = form.querySelectorAll('input[name="job_ids"]:checked');
+        if (picked.length === 0) {
+          alert('请先勾选至少一张要清退的取数单');
+          return false;
+        }
+        if (picked.length > {{ max_retire_jobs }}) {
+          alert('单次清退至多 {{ max_retire_jobs }} 张取数单，本次勾选 ' + picked.length + ' 张');
+          return false;
+        }
+        return confirm('确认清退选中的 ' + picked.length + ' 张取数单？未被引用的旧输入集及明细将被一并删除。');
+      }
+    </script>
     {% else %}<p class="muted">暂无取数单。</p>{% endif %}
   </div>
 </main>

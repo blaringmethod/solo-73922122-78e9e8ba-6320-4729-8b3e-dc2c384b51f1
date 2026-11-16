@@ -20,14 +20,16 @@ def load_demo_if_empty() -> bool:
     demo_samples = DEMO_DIR / "samples.csv"
     demo_revisions = DEMO_DIR / "revisions.csv"
     with db.session_scope() as session:
-        overview = db.get_current_overview(session)
-        if overview["sample_set"] is not None or overview["revision_set"] is not None:
-            return False
-        sample_rows = parse_samples(demo_samples.read_bytes())
-        revision_rows = parse_revisions(demo_revisions.read_bytes())
-        db.replace_sample_set(session, sample_rows, demo_samples.name)
-        db.replace_revision_set(session, revision_rows, demo_revisions.name)
-        return True
+        # Lock the singleton so two instances starting together cannot both
+        # insert the demo data (PostgreSQL row lock; SQLite process mutex).
+        with db.current_input_locked(session) as current:
+            if current.sample_set_id is not None or current.revision_set_id is not None:
+                return False
+            sample_rows = parse_samples(demo_samples.read_bytes())
+            revision_rows = parse_revisions(demo_revisions.read_bytes())
+            db.replace_sample_set(session, sample_rows, demo_samples.name)
+            db.replace_revision_set(session, revision_rows, demo_revisions.name)
+            return True
 
 
 def maybe_load_demo() -> None:

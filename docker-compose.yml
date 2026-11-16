@@ -15,7 +15,7 @@ services:
       timeout: 3s
       retries: 20
 
-  web:
+  web1:
     build: .
     depends_on:
       db:
@@ -23,8 +23,21 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://tempapp:tempapp@db:5432/tempapp
       LOAD_DEMO_ON_START: "1"
+      INSTANCE_OWNER: "web1"
     ports:
-      - "8000:8000"
+      - "8001:8000"
+
+  web2:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://tempapp:tempapp@db:5432/tempapp
+      LOAD_DEMO_ON_START: "1"
+      INSTANCE_OWNER: "web2"
+    ports:
+      - "8002:8000"
 
 volumes:
   pgdata:
